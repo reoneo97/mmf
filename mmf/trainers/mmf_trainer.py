@@ -137,8 +137,8 @@ class MMFTrainer(
 
     def train(self):
         logger.info("===== Model =====")
-        logger.info(self.model)
-        print_model_parameters(self.model)
+        # logger.info(self.model)
+        # print_model_parameters(self.model)
 
         if "train" in self.run_type:
             self.on_train_start()

@@ -1,8 +1,5 @@
-includes:
-- configs/datasets/hateful_memes/with_features.yaml
-
 model_config:
-  vilbert:
+  vitbert:
     training_head_type: classification
     num_labels: 2
     losses:
@@ -10,6 +7,10 @@ model_config:
 
 dataset_config:
   hateful_memes:
+    use_images: true
+    use_features: false
+    # use_images: false
+    # use_features: true
     return_features_info: true
     processors:
       text_processor:
