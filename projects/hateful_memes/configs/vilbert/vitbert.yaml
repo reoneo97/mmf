@@ -4,6 +4,7 @@ model_config:
     num_labels: 2
     losses:
     - cross_entropy
+    v_hidden_size: 768
 
 dataset_config:
   hateful_memes:
@@ -48,9 +49,9 @@ evaluation:
   - roc_auc
 
 training:
-  batch_size: 1
+  batch_size: 32
   lr_scheduler: true
-  max_updates: 22000
+  max_updates: 10000
   find_unused_parameters: true
   early_stop:
     criteria: hateful_memes/roc_auc

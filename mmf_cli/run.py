@@ -22,7 +22,6 @@ setup_very_basic_config()
 def main(configuration, init_distributed=False, predict=False):
     # A reload might be needed for imports
     setup_imports()
-    print(configuration)
     configuration.import_user_dir()
     config = configuration.get_config()
 
