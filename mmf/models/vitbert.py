@@ -995,23 +995,25 @@ class ViLBERTBase(BertPreTrainedModel):
         self.task_specific_tokens = config.task_specific_tokens
 
         # initlize the vision embedding
-        self.v_embeddings = BertImageFeatureEmbeddings(config)
+        self.v_embeddings = ViTEmbeddings(config)
 
         self.encoder = BertEncoder(config)
         self.t_pooler = BertTextPooler(config)
         self.v_pooler = BertImagePooler(config)
 
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            config.vit_model_name
-        )
-        self.vit = ViTModel.from_pretrained(config.vit_model_name)
+        # self.image_processor = AutoImageProcessor.from_pretrained(
+        #     config.vit_model_name
+        # )
+        # self.vit = ViTModel.from_pretrained(config.vit_model_name)
 
         self.init_weights()
 
     def forward(
         self,
         input_txt: Tensor,
-        image: Tensor,
+        image:Tensor, 
+        image_feature: Tensor,
+        image_location: Tensor,
         token_type_ids: Optional[Tensor] = None,
         attention_mask: Optional[Tensor] = None,
         image_attention_mask: Optional[Tensor] = None,
@@ -1090,7 +1092,7 @@ class ViLBERTBase(BertPreTrainedModel):
                 dtype=next(self.parameters()).dtype
             )
         embedding_output = self.embeddings(input_txt, token_type_ids, task_ids)
-        v_embedding_output = self.v_embeddings(image)
+        v_embedding_output = self.v_embeddings(image_feature, image_location)
         
         encoded_layers_t, encoded_layers_v, all_attention_mask = self.encoder(
             embedding_output,
@@ -1166,8 +1168,9 @@ class ViLBERTForClassification(nn.Module):
     def forward(
         self,
         input_ids: Tensor,
-        image_feature: Tensor,
-        image_location: Tensor,
+        image: Tensor, 
+        image_feature: Optional[Tensor] = None,
+        image_location: Optional[Tensor] = None,
         token_type_ids: Optional[Tensor] = None,
         attention_mask: Optional[Tensor] = None,
         image_attention_mask: Optional[Tensor] = None,
@@ -1187,6 +1190,7 @@ class ViLBERTForClassification(nn.Module):
             _encoded_layers_v_output,
         ) = self.bert(
             input_ids,
+            image, 
             image_feature,
             image_location,
             token_type_ids,
@@ -1252,11 +1256,10 @@ class ViTBERT(BaseModel):
         bert_input_type_ids = sample_list.segment_ids
         if sample_list.dataset_name != "hateful_memes":
             raise ValueError('This model only works for the hateful memes dataset')
-
+        image = getattr(sample_list, "image", None)
         image_info = getattr(sample_list, "image_info_0", {})
         image_dim_variable = getattr(image_info, "max_features", None)
         image_feature_variable = getattr(sample_list, "image_feature_0", None)
-        image = getattr(sample_list, image)
         image_label_variable = getattr(sample_list, "image_labels", None)
         image_location_variable = getattr(image_info, "bbox", None)
 
@@ -1272,6 +1275,8 @@ class ViTBERT(BaseModel):
             "attention_mask": bert_input_mask,
             "token_type_ids": bert_input_type_ids, 
             "image_dim": image_dim_variable,
+            "image_feature": image_feature_variable,
+            "image_location": image_location_variable,
             "image":image, 
             "image_target": image_target_variable,
             "image_label": image_label_variable,
@@ -1305,6 +1310,8 @@ class ViTBERT(BaseModel):
         output_dict = self.model(
             params["input_ids"],
             params["image"],
+            params["image_feature"],
+            params["image_location"],
             params["token_type_ids"],
             params["attention_mask"],
             params["image_attention_mask"],
