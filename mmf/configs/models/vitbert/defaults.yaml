@@ -1,6 +1,7 @@
 model_config:
   vitbert:
     bert_model_name: bert-base-uncased
+    vit_model_name: google/vit-base-patch16-224-in21k
     training_head_type: pretraining
     visual_embedding_dim: 2048
     special_visual_initialize: true
@@ -10,7 +11,7 @@ model_config:
     bypass_transformer: false
     output_attentions: false
     output_hidden_states: false
-    text_only: false
+    text_only: falses
     random_initialize: false
     freeze_base: false
     finetune_lr_multiplier: 1
@@ -56,3 +57,6 @@ model_config:
     objective: 0
     num_negative: 128
     model: "bert"
+    image_size: 224
+    patch_size: 16
+    num_channels: 3

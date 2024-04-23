@@ -3,7 +3,7 @@
 import math
 import os
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -48,7 +48,13 @@ from transformers import (
     ViTModel,
     AutoImageProcessor,
 )
-from transformers.models.vit.modeling_vit import ViTEmbeddings
+from transformers.models.vit.modeling_vit import (
+    ViTEmbeddings,
+    ViTLayer, 
+    ViTAttention, 
+    ViTIntermediate, 
+    ViTOutput
+)
 
 class BertSelfAttention(nn.Module):
     def __init__(self, config):
@@ -178,10 +184,6 @@ class BertImageSelfAttention(nn.Module):
         self.key = nn.Linear(config.v_hidden_size, self.all_head_size)
         self.value = nn.Linear(config.v_hidden_size, self.all_head_size)
 
-        if self.dynamic_attention:
-            self.dyLinear_q = nn.Linear(config.hidden_size, self.all_head_size)
-            self.dyLinear_k = nn.Linear(config.hidden_size, self.all_head_size)
-
         self.dropout = nn.Dropout(config.v_attention_probs_dropout_prob)
 
     def transpose_for_scores(self, x):
@@ -203,20 +205,6 @@ class BertImageSelfAttention(nn.Module):
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
 
-        if (
-            self.dynamic_attention
-            and hasattr(self, "dyLinear_q")
-            and hasattr(self, "dyLinear_k")
-        ):
-            pool_embedding = (txt_embedding * txt_attention_mask).sum(1)
-            pool_embedding = pool_embedding / txt_attention_mask.sum(1)
-
-            # given pool embedding, Linear and Sigmoid layer.
-            gate_q = 1 + torch.sigmoid(self.dyLinear_q(pool_embedding))
-            gate_k = 1 + torch.sigmoid(self.dyLinear_k(pool_embedding))
-
-            mixed_query_layer = mixed_query_layer * gate_q.unsqueeze(1)
-            mixed_key_layer = mixed_key_layer * gate_k.unsqueeze(1)
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
@@ -563,6 +551,7 @@ class BertConnectionLayer(nn.Module):
         return layer_output1, layer_output2, co_attention_probs
 
 
+
 class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -581,7 +570,7 @@ class BertEncoder(nn.Module):
         self.fixed_t_layer = config.fixed_t_layer
         self.fixed_v_layer = config.fixed_v_layer
         layer = BertLayer(config)
-        v_layer = BertImageLayer(config)
+        v_layer = ViTLayer(config)
         connect_layer = BertConnectionLayer(config)
 
         self.layer = nn.ModuleList(
@@ -848,52 +837,126 @@ class BertImgPredictionHeadTransform(nn.Module):
         hidden_states = self.transform_act_fn(hidden_states)
         hidden_states = self.LayerNorm(hidden_states)
         return hidden_states
+    
+    
+class ViTEmbeddings(nn.Module):
+    """
+    Construct the CLS token, position and patch embeddings. Optionally, also the mask token.
+    """
 
-
-class BertImagePredictionHead(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: ViTConfig, use_mask_token: bool = False) -> None:
         super().__init__()
-        self.transform = BertImgPredictionHeadTransform(config)
 
-        # The output weights are the same as the input embeddings, but there is
-        # an output-only bias for each token.
-        self.decoder = nn.Linear(config.v_hidden_size, config.v_target_size)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, config.hidden_size))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size)) if use_mask_token else None
+        self.patch_embeddings = ViTPatchEmbeddings(config)
+        num_patches = self.patch_embeddings.num_patches
+        self.position_embeddings = nn.Parameter(torch.randn(1, num_patches + 1, config.hidden_size))
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.config = config
 
-    def forward(self, hidden_states: Tensor) -> Tensor:
-        hidden_states = self.transform(hidden_states)
-        hidden_states = self.decoder(hidden_states)
-        return hidden_states
+    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        """
+        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher
+        resolution images.
 
+        Source:
+        https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174
+        """
 
-class BertPreTrainingHeads(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.predictions = BertLMPredictionHead(config)
-        self.bi_seq_relationship = nn.Linear(config.bi_hidden_size, 2)
-        self.imagePredictions = BertImagePredictionHead(config)
-        self.fusion_method = config.fusion_method
-        self.dropout = nn.Dropout(0.1)
+        num_patches = embeddings.shape[1] - 1
+        num_positions = self.position_embeddings.shape[1] - 1
+        if num_patches == num_positions and height == width:
+            return self.position_embeddings
+        class_pos_embed = self.position_embeddings[:, 0]
+        patch_pos_embed = self.position_embeddings[:, 1:]
+        dim = embeddings.shape[-1]
+        h0 = height // self.config.patch_size
+        w0 = width // self.config.patch_size
+        # we add a small number to avoid floating point error in the interpolation
+        # see discussion at https://github.com/facebookresearch/dino/issues/8
+        h0, w0 = h0 + 0.1, w0 + 0.1
+        patch_pos_embed = patch_pos_embed.reshape(1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)), dim)
+        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed,
+            scale_factor=(h0 / math.sqrt(num_positions), w0 / math.sqrt(num_positions)),
+            mode="bicubic",
+            align_corners=False,
+        )
+        assert int(h0) == patch_pos_embed.shape[-2] and int(w0) == patch_pos_embed.shape[-1]
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
     def forward(
         self,
-        sequence_output_t: Tensor,
-        sequence_output_v: Tensor,
-        pooled_output_t: Tensor,
-        pooled_output_v: Tensor,
-    ) -> Tuple[Tensor, Tensor, Tensor]:
-        if self.fusion_method == "sum":
-            pooled_output = self.dropout(pooled_output_t + pooled_output_v)
-        elif self.fusion_method == "mul":
-            pooled_output = self.dropout(pooled_output_t * pooled_output_v)
+        pixel_values: torch.Tensor,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        interpolate_pos_encoding: bool = False,
+    ) -> torch.Tensor:
+        batch_size, num_channels, height, width = pixel_values.shape
+        embeddings = self.patch_embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
+
+        if bool_masked_pos is not None:
+            seq_length = embeddings.shape[1]
+            mask_tokens = self.mask_token.expand(batch_size, seq_length, -1)
+            # replace the masked visual tokens by mask_tokens
+            mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
+            embeddings = embeddings * (1.0 - mask) + mask_tokens * mask
+
+        # add the [CLS] token to the embedded patch tokens
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        embeddings = torch.cat((cls_tokens, embeddings), dim=1)
+
+        # add positional encoding to each token
+        if interpolate_pos_encoding:
+            embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
         else:
-            raise AssertionError
+            embeddings = embeddings + self.position_embeddings
 
-        prediction_scores_t = self.predictions(sequence_output_t)
-        seq_relationship_score = self.bi_seq_relationship(pooled_output)
-        prediction_scores_v = self.imagePredictions(sequence_output_v)
+        embeddings = self.dropout(embeddings)
 
-        return prediction_scores_t, prediction_scores_v, seq_relationship_score
+        return embeddings
 
+
+class ViTPatchEmbeddings(nn.Module):
+    """
+    This class turns `pixel_values` of shape `(batch_size, num_channels, height, width)` into the initial
+    `hidden_states` (patch embeddings) of shape `(batch_size, seq_length, hidden_size)` to be consumed by a
+    Transformer.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        image_size, patch_size = config.image_size, config.patch_size
+        num_channels, hidden_size = config.num_channels, config.hidden_size
+
+        image_size = (image_size, image_size)
+        patch_size = (patch_size, patch_size)
+        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_channels = num_channels
+        self.num_patches = num_patches
+
+        self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False) -> torch.Tensor:
+        batch_size, num_channels, height, width = pixel_values.shape
+        if num_channels != self.num_channels:
+            raise ValueError(
+                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
+                f" Expected {self.num_channels} but got {num_channels}."
+            )
+        if not interpolate_pos_encoding:
+            if height != self.image_size[0] or width != self.image_size[1]:
+                raise ValueError(
+                    f"Input image size ({height}*{width}) doesn't match model"
+                    f" ({self.image_size[0]}*{self.image_size[1]})."
+                )
+        embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
+        return embeddings
+    
 
 class BertImageFeatureEmbeddings(nn.Module):
     """Construct the embeddings from image, spatial location (omit now) and
@@ -938,13 +1001,17 @@ class ViLBERTBase(BertPreTrainedModel):
         self.t_pooler = BertTextPooler(config)
         self.v_pooler = BertImagePooler(config)
 
+        self.image_processor = AutoImageProcessor.from_pretrained(
+            config.vit_model_name
+        )
+        self.vit = ViTModel.from_pretrained(config.vit_model_name)
+
         self.init_weights()
 
     def forward(
         self,
         input_txt: Tensor,
-        image_feature: Tensor,
-        image_location: Tensor,
+        image: Tensor,
         token_type_ids: Optional[Tensor] = None,
         attention_mask: Optional[Tensor] = None,
         image_attention_mask: Optional[Tensor] = None,
@@ -961,7 +1028,6 @@ class ViLBERTBase(BertPreTrainedModel):
         Optional[List[Tensor]],
         Optional[List[Tensor]],
     ]:
-        print('Image Feature', image_feature)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_txt)
         if token_type_ids is None:
@@ -1024,7 +1090,8 @@ class ViLBERTBase(BertPreTrainedModel):
                 dtype=next(self.parameters()).dtype
             )
         embedding_output = self.embeddings(input_txt, token_type_ids, task_ids)
-        v_embedding_output = self.v_embeddings(image_feature, image_location)
+        v_embedding_output = self.v_embeddings(image)
+        
         encoded_layers_t, encoded_layers_v, all_attention_mask = self.encoder(
             embedding_output,
             v_embedding_output,
@@ -1057,196 +1124,6 @@ class ViLBERTBase(BertPreTrainedModel):
             encoded_layers_t_output,
             encoded_layers_v_output,
         )
-
-
-class ViLBERTForPretraining(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-
-        self.bert = ViLBERTBase.from_pretrained(
-            self.config.bert_model_name,
-            config=BertConfig.from_dict(
-                OmegaConf.to_container(self.config, resolve=True)
-            ),
-            cache_dir=os.path.join(get_mmf_cache_dir(), "distributed_{}".format(-1)),
-        )
-        self.cls = BertPreTrainingHeads(config)
-        self.vocab_size = self.config.vocab_size
-        self.visual_target = config.visual_target
-        self.num_negative = config.num_negative
-        self.loss_fct = CrossEntropyLoss(ignore_index=-1)
-
-        if self.visual_target == 0:
-            self.vis_criterion = nn.KLDivLoss(reduction="none")
-        elif self.visual_target == 1:
-            self.vis_criterion = nn.MSELoss(reduction="none")
-        elif self.visual_target == 2:
-            self.vis_criterion = CrossEntropyLoss()
-
-    def init_weights(self):
-        if self.config.random_initialize is False:
-            if self.config.bert_model_name is None:
-                # No pretrained model, init weights
-                self.bert.init_weights()
-                self.cls.apply(self.bert._init_weights)
-
-            self.tie_weights()
-
-    def tie_weights(self):
-        """Make sure we are sharing the input and output embeddings.
-        Export to TorchScript can't handle parameter sharing so we are cloning
-        them instead.
-        """
-        self._tie_or_clone_weights(
-            self.cls.predictions.decoder, self.bert.embeddings.word_embeddings
-        )
-
-    def forward(
-        self,
-        input_ids: Tensor,
-        image_feature: Tensor,
-        image_location: Tensor,
-        token_type_ids: Tensor,
-        attention_mask: Tensor,
-        image_attention_mask: Tensor,
-        masked_lm_labels: Optional[Tensor] = None,
-        image_label: Optional[Tensor] = None,
-        image_target: Optional[Tensor] = None,
-        output_all_attention_masks: bool = False,
-    ) -> Dict[str, Tensor]:
-        masked_img_loss: Optional[Tensor] = None
-        (
-            sequence_output_t,
-            sequence_output_v,
-            pooled_output_t,
-            pooled_output_v,
-            attention_weights,
-            _encoded_layers_t_output,
-            _encoded_layers_v_output,
-        ) = self.bert(
-            input_ids,
-            image_feature,
-            image_location,
-            token_type_ids,
-            attention_mask,
-            image_attention_mask,
-            output_all_encoded_layers=False,
-            output_all_attention_masks=output_all_attention_masks,
-        )
-
-        prediction_scores_t, prediction_scores_v, seq_relationship_score = self.cls(
-            sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v
-        )
-        output = {}
-
-        if not torch.jit.is_scripting() and output_all_attention_masks:
-            output["attention_weights"] = attention_weights
-
-        if image_label is not None and image_target is not None:
-            if self.visual_target == 1:
-                img_loss = self.vis_criterion(prediction_scores_v, image_target)
-                masked_img_loss = torch.sum(
-                    img_loss * torch.eq(image_label, 1).unsqueeze(2).float()
-                ) / max(
-                    torch.sum(
-                        torch.eq(image_label, 1).unsqueeze(2).expand_as(img_loss)
-                    ),
-                    1,
-                )
-            elif self.visual_target == 0:
-                img_loss = self.vis_criterion(
-                    F.log_softmax(prediction_scores_v, dim=2), image_target
-                )
-
-                masked_img_loss = torch.sum(
-                    img_loss * torch.eq(image_label, 1).unsqueeze(2).float()
-                ) / max(torch.sum(torch.eq(image_label, 1)), 0)
-            elif self.visual_target == 2:
-                # generate negative sampled index.
-                num_across_batch = int(self.num_negative * 0.7)
-                num_inside_batch = int(self.num_negative * 0.3)
-
-                batch_size, num_regions, _ = prediction_scores_v.size()
-                assert batch_size != 0
-                # random negative across batches.
-                row_across_index = torch.ones(
-                    batch_size,
-                    num_regions,
-                    num_across_batch,
-                    dtype=input_ids.dtype,
-                    device=input_ids.device,
-                ).random_(0, batch_size - 1)
-                col_across_index = torch.ones(
-                    batch_size,
-                    num_regions,
-                    num_across_batch,
-                    dtype=input_ids.dtype,
-                    device=input_ids.device,
-                ).random_(0, num_regions)
-
-                for i in range(batch_size - 1):
-                    row_across_index[i][row_across_index[i] == i] = batch_size - 1
-                final_across_index = row_across_index * num_regions + col_across_index
-
-                # random negative inside batches.
-                row_inside_index = torch.zeros(
-                    batch_size,
-                    num_regions,
-                    num_inside_batch,
-                    dtype=input_ids.dtype,
-                    device=input_ids.device,
-                )
-                col_inside_index = torch.ones(
-                    batch_size,
-                    num_regions,
-                    num_inside_batch,
-                    dtype=input_ids.dtype,
-                    device=input_ids.device,
-                ).random_(0, num_regions - 1)
-
-                for i in range(batch_size):
-                    row_inside_index[i] = i
-                for i in range(num_regions - 1):
-                    col_inside_index[:, i, :][col_inside_index[:, i, :] == i] = (
-                        num_regions - 1
-                    )
-                final_inside_index = row_inside_index * num_regions + col_inside_index
-
-                final_index = torch.cat((final_across_index, final_inside_index), dim=2)
-
-                # Let's first sample where we need to compute.
-                predict_v = prediction_scores_v[image_label == 1]
-                neg_index_v = final_index[image_label == 1]
-
-                flat_image_target = image_target.view(batch_size * num_regions, -1)
-                # we also need to append the target feature at the beginning.
-                negative_v = flat_image_target[neg_index_v]
-                positive_v = image_target[image_label == 1]
-                sample_v = torch.cat((positive_v.unsqueeze(1), negative_v), dim=1)
-
-                # calculate the loss.
-                score = torch.bmm(sample_v, predict_v.unsqueeze(2)).squeeze(2)
-                masked_img_loss = self.vis_criterion(
-                    score,
-                    torch.zeros(
-                        score.size(0), dtype=input_ids.dtype, device=input_ids.device
-                    ),
-                )
-            if masked_img_loss is not None:
-                output["masked_img_loss"] = masked_img_loss.unsqueeze(0)
-
-        if masked_lm_labels is not None:
-            masked_lm_loss = self.loss_fct(
-                prediction_scores_t.view(-1, self.vocab_size), masked_lm_labels.view(-1)
-            )
-            output["masked_lm_loss"] = masked_lm_loss.unsqueeze(0)
-        # next_sentence_loss = self.loss_fct(
-        #     seq_relationship_score.view(-1, 2), next_sentence_label.view(-1)
-        # )
-        # output["next_sentence_loss"] = next_sentence_loss.unsqueeze(0)
-        return output
-
 
 class ViLBERTForClassification(nn.Module):
     def __init__(self, config):
@@ -1345,12 +1222,6 @@ class ViLBERTForClassification(nn.Module):
 class ViTBERT(BaseModel):
     def __init__(self, config):
         super().__init__(config)
-        image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-        model = ViTModel.from_pretrained("google/vit-base-patch16-224-in21k")
-        print(model)
-        embeds = model.embeddings
-        embeds.train()
-        print(embeds)
         
 
     @classmethod
@@ -1367,10 +1238,8 @@ class ViTBERT(BaseModel):
         )
 
     def build(self):
-        if self.config.training_head_type == "pretraining":
-            self.model = ViLBERTForPretraining(self.config)
-        else:
-            self.model = ViLBERTForClassification(self.config)
+
+        self.model = ViLBERTForClassification(self.config)
 
         if self.config.get("freeze_base", False):
             for p in self.model.bert.parameters():
@@ -1381,55 +1250,29 @@ class ViTBERT(BaseModel):
         bert_input_ids = sample_list.input_ids
         bert_input_mask = sample_list.input_mask
         bert_input_type_ids = sample_list.segment_ids
-        print("Image", sample_list['image'])
-        if sample_list.dataset_name == "nlvr2":
-            bert_input_ids = torch.cat([bert_input_ids, bert_input_ids])
-            bert_input_mask = torch.cat([bert_input_mask, bert_input_mask])
-            bert_input_type_ids = torch.cat([bert_input_type_ids, bert_input_type_ids])
+        if sample_list.dataset_name != "hateful_memes":
+            raise ValueError('This model only works for the hateful memes dataset')
 
-            # image input
-            img0 = getattr(sample_list, "img0", {})
-            image_info = getattr(img0, "image_info_0", {})
-            image_dim_variable_0 = getattr(image_info, "max_features", None)
-            image_feature_variable_0 = getattr(img0, "image_feature_0", None)
-            image_location_variable_0 = getattr(image_info, "bbox", None)
+        image_info = getattr(sample_list, "image_info_0", {})
+        image_dim_variable = getattr(image_info, "max_features", None)
+        image_feature_variable = getattr(sample_list, "image_feature_0", None)
+        image = getattr(sample_list, image)
+        image_label_variable = getattr(sample_list, "image_labels", None)
+        image_location_variable = getattr(image_info, "bbox", None)
 
-            img1 = getattr(sample_list, "img1", {})
-            image_info = getattr(img1, "image_info_0", {})
-            image_dim_variable_1 = getattr(image_info, "max_features", None)
-            image_feature_variable_1 = getattr(img1, "image_feature_0", None)
-            image_location_variable_1 = getattr(image_info, "bbox", None)
-
-            image_feature_variable = torch.cat(
-                [image_feature_variable_0, image_feature_variable_1]
-            )
-            image_location_variable = torch.cat(
-                [image_location_variable_0, image_location_variable_1]
-            )
-            image_dim_variable = torch.cat([image_dim_variable_0, image_dim_variable_1])
-            image_label_variable = None
-            image_target_variable = None
-        else:
-            image_info = getattr(sample_list, "image_info_0", {})
-            image_dim_variable = getattr(image_info, "max_features", None)
-            image_feature_variable = getattr(sample_list, "image_feature_0", None)
-            image_label_variable = getattr(sample_list, "image_labels", None)
-            image_location_variable = getattr(image_info, "bbox", None)
-
-            cls_prob = getattr(image_info, "cls_prob", None)
-            image_target = np.array(cls_prob, dtype=np.float32)
-            image_target_variable = torch.tensor(
-                image_target, dtype=torch.float, device=bert_input_ids.device
-            )
-        
+        cls_prob = getattr(image_info, "cls_prob", None)
+        image_target = np.array(cls_prob, dtype=np.float32)
+        image_target_variable = torch.tensor(
+            image_target, dtype=torch.float, device=bert_input_ids.device
+        )
+    
 
         return {
             "input_ids": bert_input_ids,
             "attention_mask": bert_input_mask,
-            "token_type_ids": bert_input_type_ids,
+            "token_type_ids": bert_input_type_ids, 
             "image_dim": image_dim_variable,
-            "image_feature": image_feature_variable,
-            "image_location": image_location_variable,
+            "image":image, 
             "image_target": image_target_variable,
             "image_label": image_label_variable,
         }
@@ -1439,7 +1282,6 @@ class ViTBERT(BaseModel):
 
     def forward(self, sample_list):
         params = self.get_image_and_text_features(sample_list)
-        print(params)
         # pretraining labels
         params["masked_lm_labels"] = getattr(sample_list, "lm_label_ids", None)
         # is_random_next = getattr(sample_list, "is_correct", None)
@@ -1462,8 +1304,7 @@ class ViTBERT(BaseModel):
 
         output_dict = self.model(
             params["input_ids"],
-            params["image_feature"],
-            params["image_location"],
+            params["image"],
             params["token_type_ids"],
             params["attention_mask"],
             params["image_attention_mask"],

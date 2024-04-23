@@ -22,7 +22,6 @@ setup_very_basic_config()
 def main(configuration, init_distributed=False, predict=False):
     # A reload might be needed for imports
     setup_imports()
-    print(configuration)
     configuration.import_user_dir()
     config = configuration.get_config()
 
@@ -33,7 +32,6 @@ def main(configuration, init_distributed=False, predict=False):
     if init_distributed:
         distributed_init(config)
 
-    # print('I am not Distributed')
     seed = config.training.seed
     config.training.seed = set_seed(seed if seed == -1 else seed + get_rank())
     registry.register("seed", config.training.seed)
