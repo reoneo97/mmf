@@ -954,6 +954,7 @@ class ViLBERTBase(BertPreTrainedModel):
         Optional[List[Tensor]],
         Optional[List[Tensor]],
     ]:
+        # print("Image Feature", image_feature.shape)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_txt)
         if token_type_ids is None:
@@ -1427,7 +1428,10 @@ class ViLBERT(BaseModel):
         # is_random_next = getattr(sample_list, "is_correct", None)
         # TODO(aps): Fix on dataset side
         # params["is_random_next"] = None
-
+        for k, v in params.items():
+            if v is not None:
+                print(k, v.shape)
+        raise ValueError('Stop')
         # Prepare Mask
         if params["image_feature"] is not None and params["image_dim"] is not None:
             image_mask = torch.arange(
