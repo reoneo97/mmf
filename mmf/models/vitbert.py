@@ -50,7 +50,6 @@ from transformers import (
 )
 from transformers.models.vit.modeling_vit import (
     ViTEmbeddings,
-    ViTLayer, 
     ViTAttention, 
     ViTIntermediate, 
     ViTOutput
@@ -163,169 +162,47 @@ class BertLayer(nn.Module):
         return self.forward(hidden_states, attention_mask)
 
 
-class BertImageSelfAttention(nn.Module):
-    def __init__(self, config):
+class ViTLayer(nn.Module):
+    """This corresponds to the Block class in the timm implementation."""
+
+    def __init__(self, config) -> None:
         super().__init__()
-        if config.v_hidden_size % config.v_num_attention_heads != 0:
-            raise ValueError(
-                "The hidden size (%d) is not a multiple of the number of attention "
-                "heads (%d)" % (config.v_hidden_size, config.v_num_attention_heads)
-            )
-        self.dynamic_attention = config.dynamic_attention
-        self.num_attention_heads = config.v_num_attention_heads
-        self.attention_head_size = int(
-            config.v_hidden_size / config.v_num_attention_heads
-        )
-
-        self.visualization = config.visualization
-
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-        self.query = nn.Linear(config.v_hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.v_hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.v_hidden_size, self.all_head_size)
-
-        self.dropout = nn.Dropout(config.v_attention_probs_dropout_prob)
-
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)
+        self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.attention = ViTAttention(config)
+        self.intermediate = ViTIntermediate(config)
+        self.output = ViTOutput(config)
+        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
         self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        txt_embedding: Tensor,
-        txt_attention_mask: Tensor,
-    ) -> Tuple[Tensor, Dict[str, Tensor]]:
-        mixed_query_layer = self.query(hidden_states)
-        mixed_key_layer = self.key(hidden_states)
-        mixed_value_layer = self.value(hidden_states)
-
-
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-        key_layer = self.transpose_for_scores(mixed_key_layer)
-        value_layer = self.transpose_for_scores(mixed_value_layer)
-
-        # Take the dot product between "query" and "key" to get the
-        # raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        # Apply the attention mask is (precomputed for all layers in BertModel
-        # forward() function)
-        attention_scores = attention_scores + attention_mask
-
-        # Normalize the attention scores to probabilities.
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs, value_layer)
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
-
-        if self.visualization:
-            attn_data = {
-                "attn": attention_probs,
-                "queries": query_layer,
-                "keys": key_layer,
-            }
-        else:
-            attn_data = {}
-
-        return context_layer, attn_data
-
-
-class BertImageSelfOutput(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.v_hidden_size, config.v_hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.v_hidden_dropout_prob)
-
-    def forward(self, hidden_states: Tensor, input_tensor: Tensor) -> Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
-
-
-class BertImageAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.self = BertImageSelfAttention(config)
-        self.output = BertImageSelfOutput(config)
-
-    def forward(
-        self,
-        input_tensor: Tensor,
-        attention_mask: Tensor,
-        txt_embedding: Tensor,
-        txt_attention_mask: Tensor,
-    ) -> Tuple[Tensor, Dict[str, Tensor]]:
-        self_output, attention_probs = self.self(
-            input_tensor, attention_mask, txt_embedding, txt_attention_mask
+        hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        self_attention_outputs = self.attention(
+            self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
+            head_mask,
+            output_attentions=output_attentions,
         )
-        attention_output = self.output(self_output, input_tensor)
-        return attention_output, attention_probs
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
 
+        # first residual connection
+        hidden_states = attention_output + hidden_states
 
-class BertImageIntermediate(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.v_hidden_size, config.v_intermediate_size)
-        if isinstance(config.v_hidden_act, str):
-            self.intermediate_act_fn = ACT2FN[config.v_hidden_act]
-        else:
-            self.intermediate_act_fn = config.v_hidden_act
+        # in ViT, layernorm is also applied after self-attention
+        layer_output = self.layernorm_after(hidden_states)
+        layer_output = self.intermediate(layer_output)
 
-    def forward(self, hidden_states: Tensor) -> Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-        return hidden_states
+        # second residual connection is done here
+        layer_output = self.output(layer_output, hidden_states)
 
+        outputs = (layer_output,) + outputs
 
-class BertImageOutput(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.v_intermediate_size, config.v_hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.v_hidden_dropout_prob)
-
-    def forward(self, hidden_states: Tensor, input_tensor: Tensor) -> Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
-
-
-class BertImageLayer(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.attention = BertImageAttention(config)
-        self.intermediate = BertImageIntermediate(config)
-        self.output = BertImageOutput(config)
-
-    def forward(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        txt_embedding: Tensor,
-        txt_attention_mask: Tensor,
-    ) -> Tuple[Tensor, Dict[str, Tensor]]:
-        attention_output, attention_probs = self.attention(
-            hidden_states, attention_mask, txt_embedding, txt_attention_mask
-        )
-        intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output, attention_output)
-        return layer_output, attention_probs
-
+        return outputs
+    
     @torch.no_grad()
     def forward_no_grad(
         self,
@@ -335,9 +212,8 @@ class BertImageLayer(nn.Module):
         txt_attention_mask: Tensor,
     ) -> Tuple[Tensor, Dict[str, Tensor]]:
         return self.forward(
-            hidden_states, attention_mask, txt_embedding, txt_attention_mask
+            hidden_states, attention_mask
         )
-
 
 class BertBiAttention(nn.Module):
     def __init__(self, config):
