@@ -232,6 +232,7 @@ class BaseModel(pl.LightningModule):
             Dict: Dict containing loss.
         """
         output = self._forward_lightning_step(batch, batch_idx)
+        print(batch)
         if hasattr(self, "train_meter"):
             report = Report(batch, output).detach()
             self.train_meter.update_from_report(report)
