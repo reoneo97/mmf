@@ -1,5 +1,5 @@
 model_config:
-  vitbert:
+  vitencbert:
     training_head_type: classification
     num_labels: 2
     losses:
@@ -49,6 +49,7 @@ evaluation:
   - roc_auc
 
 training:
+  experiment_name: vitencbert-small
   batch_size: 32
   lr_scheduler: true
   max_updates: 10000
@@ -56,7 +57,18 @@ training:
   early_stop:
     criteria: hateful_memes/roc_auc
     minimize: false
-
+  wandb: 
+    enabled: true
+    entity: null
+    project: mmf 
+    log_checkpoint: true
 checkpoint:
   pretrained_state_mapping:
     model.bert: model.bert
+        
+env:
+    # To change the path to the directory where wandb metadata would be 
+    # stored (Default: env.log_dir):
+  wandb_projectname: mmf
+
+

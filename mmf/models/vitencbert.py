@@ -1169,15 +1169,15 @@ class ViTEncBERTForClassification(nn.Module):
         return output
 
 
-@registry.register_model("vitbert")
-class ViTBERT(BaseModel):
+@registry.register_model("vitencbert")
+class ViTEncBERT(BaseModel):
     def __init__(self, config):
         super().__init__(config)
         
 
     @classmethod
     def config_path(cls):
-        return "configs/models/vitbert/defaults.yaml"
+        return "configs/models/vitencbert/defaults.yaml"
 
     # Backward compatibility
     @classmethod

@@ -424,15 +424,15 @@ class WandbLogger:
                 "To use the Weights and Biases Logger please install wandb."
                 "Run `pip install wandb` to install it."
             )
-
         self._wandb = wandb
-        self._wandb_init = dict(entity=entity, config=config, project=project)
         wandb_kwargs = dict(config.training.wandb)
         wandb_kwargs.pop("enabled")
         wandb_kwargs.pop("entity")
         wandb_kwargs.pop("project")
         wandb_kwargs.pop("log_checkpoint")
-        self._wandb_init.update(**wandb_kwargs)
+        self._wandb_init = dict(entity=entity, config=wandb_kwargs, project=project)
+        # self._wandb_init.update(**wandb_kwargs)
+        print(self._wandb_init)
 
         self.setup()
 
