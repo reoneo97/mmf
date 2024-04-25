@@ -1,10 +1,15 @@
 model_config:
-  vitencbert:
+  vitbert:
     training_head_type: classification
     num_labels: 2
     losses:
     - cross_entropy
     v_hidden_size: 768
+    v_seq_len: 197
+    image_size: 224
+    patch_size: 16
+    num_channels: 3
+
 
 dataset_config:
   hateful_memes:
@@ -43,6 +48,7 @@ dataset_config:
                 mean: [0.46777044, 0.44531429, 0.40661017]
                 std: [0.12221994, 0.12145835, 0.14380469]
 
+
 optimizer:
   type: adam_w
   params:
@@ -62,7 +68,7 @@ evaluation:
   - roc_auc
 
 training:
-  experiment_name: vitencbert-small
+  experiment_name: vitbert-small
   batch_size: 32
   lr_scheduler: true
   max_updates: 10000
@@ -70,11 +76,11 @@ training:
   early_stop:
     criteria: hateful_memes/roc_auc
     minimize: false
-  # wandb: 
-  #   enabled: true
-  #   entity: null
-  #   project: mmf 
-  #   log_checkpoint: true
+  wandb: 
+    enabled: true
+    entity: null
+    project: mmf 
+    log_checkpoint: true
 checkpoint:
   pretrained_state_mapping:
     model.bert: model.bert

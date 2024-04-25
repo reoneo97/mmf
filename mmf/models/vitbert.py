@@ -3,7 +3,7 @@
 import math
 import os
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -48,7 +48,9 @@ from transformers import (
     ViTModel,
     AutoImageProcessor,
 )
-from transformers.models.vit.modeling_vit import ViTEmbeddings
+from transformers.models.vit.modeling_vit import (
+    ViTEmbeddings, ViTLayer, ViTAttention, ViTIntermediate, ViTOutput
+)
 
 class BertSelfAttention(nn.Module):
     def __init__(self, config):
@@ -203,20 +205,20 @@ class BertImageSelfAttention(nn.Module):
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
 
-        # if (
-        #     self.dynamic_attention
-        #     and hasattr(self, "dyLinear_q")
-        #     and hasattr(self, "dyLinear_k")
-        # ):
-        #     pool_embedding = (txt_embedding * txt_attention_mask).sum(1)
-        #     pool_embedding = pool_embedding / txt_attention_mask.sum(1)
+        if (
+            self.dynamic_attention
+            and hasattr(self, "dyLinear_q")
+            and hasattr(self, "dyLinear_k")
+        ):
+            pool_embedding = (txt_embedding * txt_attention_mask).sum(1)
+            pool_embedding = pool_embedding / txt_attention_mask.sum(1)
 
-        #     # given pool embedding, Linear and Sigmoid layer.
-        #     gate_q = 1 + torch.sigmoid(self.dyLinear_q(pool_embedding))
-        #     gate_k = 1 + torch.sigmoid(self.dyLinear_k(pool_embedding))
+            # given pool embedding, Linear and Sigmoid layer.
+            gate_q = 1 + torch.sigmoid(self.dyLinear_q(pool_embedding))
+            gate_k = 1 + torch.sigmoid(self.dyLinear_k(pool_embedding))
 
-        #     mixed_query_layer = mixed_query_layer * gate_q.unsqueeze(1)
-        #     mixed_key_layer = mixed_key_layer * gate_k.unsqueeze(1)
+            mixed_query_layer = mixed_query_layer * gate_q.unsqueeze(1)
+            mixed_key_layer = mixed_key_layer * gate_k.unsqueeze(1)
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
@@ -316,6 +318,52 @@ class BertImageOutput(nn.Module):
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
+class ViTBertLayer(ViTLayer):
+    """This corresponds to the Block class in the timm implementation."""
+
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        head_mask: Tensor,
+        txt_embedding: Tensor,
+        txt_attention_mask: Tensor,
+        output_attentions: bool = False,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        self_attention_outputs = self.attention(
+            self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
+            head_mask,
+            output_attentions=output_attentions,
+        )
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+        # print("In Layer Type", type(outputs))
+        # print("In Layer Type", len(outputs))
+
+        # first residual connection
+        hidden_states = attention_output + hidden_states
+
+        # in ViT, layernorm is also applied after self-attention
+        layer_output = self.layernorm_after(hidden_states)
+        layer_output = self.intermediate(layer_output)
+
+        # second residual connection is done here
+        layer_output = self.output(layer_output, hidden_states)
+        outputs = (layer_output,) + outputs
+        return outputs, {}
+    
+    @torch.no_grad()
+    def forward_no_grad(
+        self,
+        hidden_states: Tensor,
+        head_mask: Tensor,
+        txt_embedding: Tensor,
+        txt_attention_mask: Tensor,
+        output_attentions: bool = False,
+    ):
+        return self.forward(
+            hidden_states, head_mask, txt_embedding, txt_attention_mask, output_attentions
+        )
 
 class BertImageLayer(nn.Module):
     def __init__(self, config):
@@ -402,6 +450,11 @@ class BertBiAttention(nn.Module):
         use_co_attention_mask: bool = False,
     ) -> Tuple[Tensor, Tensor, Dict[str, Tensor]]:
         # for vision input.
+
+        # Added for cleanup
+        if isinstance(input_tensor1, tuple):
+            input_tensor1 = input_tensor1[0]
+
         mixed_query_layer1 = self.query1(input_tensor1)
         mixed_key_layer1 = self.key1(input_tensor1)
         mixed_value_layer1 = self.value1(input_tensor1)
@@ -507,6 +560,10 @@ class BertBiOutput(nn.Module):
         hidden_states2: Tensor,
         input_tensor2: Tensor,
     ) -> Tuple[Tensor, Tensor]:
+        # for t in (hidden_states1, input_tensor1, hidden_states2, input_tensor2):
+        #     print(type(t))
+        if isinstance(input_tensor1, tuple):
+            input_tensor1 = input_tensor1[0]
         context_state1 = self.dense1(hidden_states1)
         context_state1 = self.dropout1(context_state1)
 
@@ -541,7 +598,7 @@ class BertConnectionLayer(nn.Module):
         co_attention_mask: Optional[Tensor] = None,
         use_co_attention_mask: bool = False,
     ) -> Tuple[Tensor, Tensor, Dict[str, Tensor]]:
-        print(input_tensor1.shape)
+
 
         bi_output1, bi_output2, co_attention_probs = self.biattention(
             input_tensor1,
@@ -582,16 +639,30 @@ class BertEncoder(nn.Module):
         self.in_batch_pairs = config.in_batch_pairs
         self.fixed_t_layer = config.fixed_t_layer
         self.fixed_v_layer = config.fixed_v_layer
+        vit_layers = ViTModel.from_pretrained(
+            config.vit_model_name
+        ).encoder.layer
+
+        vit_config = ViTConfig(
+            hidden_size=config.hidden_size, 
+            num_attention_heads=config.v_num_attention_heads,
+            hidden_act = config.v_hidden_act,
+            hidden_dropout_prob=config.v_hidden_dropout_prob
+        )
         layer = BertLayer(config)
-        v_layer = BertImageLayer(config)
+        v_layer = ViTBertLayer(vit_config)
         connect_layer = BertConnectionLayer(config)
 
         self.layer = nn.ModuleList(
             [deepcopy(layer) for _ in range(config.num_hidden_layers)]
         )
-        self.v_layer = nn.ModuleList(
-            [deepcopy(v_layer) for _ in range(config.v_num_hidden_layers)]
-        )
+        
+        v_layers = [deepcopy(v_layer) for _ in range(config.v_num_hidden_layers)]
+        for pt_layer, new_layer in zip(vit_layers, v_layers):
+            new_layer.load_state_dict(pt_layer.state_dict())
+        
+        self.v_layer = nn.ModuleList(v_layers)
+
         self.c_layer = nn.ModuleList(
             [deepcopy(connect_layer) for _ in range(len(config.v_biattention_id))]
         )
@@ -730,7 +801,11 @@ class BertEncoder(nn.Module):
                     txt_attention_mask.size(2),
                     txt_attention_mask.size(3),
                 )
+            
 
+            # Added since VIT Layers return
+            # print(image_embedding.shape)
+            # image_embedding = image_embedding[0]
             if self.with_coattention:
                 cur_c_idx = 0
                 for cur_c_layer in self.c_layer:
@@ -829,6 +904,10 @@ class BertImagePooler(nn.Module):
     def forward(self, hidden_states: Tensor) -> Tensor:
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
+        # print(type(hidden_states), len(hidden_states))
+
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
         first_token_tensor = hidden_states[:, 0]
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
@@ -895,34 +974,9 @@ class BertPreTrainingHeads(nn.Module):
         prediction_scores_v = self.imagePredictions(sequence_output_v)
 
         return prediction_scores_t, prediction_scores_v, seq_relationship_score
+    
 
-
-class BertImageFeatureEmbeddings(nn.Module):
-    """Construct the embeddings from image, spatial location (omit now) and
-    token_type embeddings.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.image_embeddings = nn.Linear(config.v_feature_size, config.v_hidden_size)
-        self.image_location_embeddings = nn.Linear(5, config.v_hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, image_feature: Tensor, image_location: Tensor) -> Tensor:
-        img_embeddings = self.image_embeddings(image_feature)
-        loc_embeddings = self.image_location_embeddings(image_location)
-
-        # TODO: we want to make the padding_idx==0, however, with custom initilization,
-        # it seems it will have a bias. Let's do masking for now
-        embeddings = self.LayerNorm(img_embeddings + loc_embeddings)
-        embeddings = self.dropout(embeddings)
-
-        return embeddings
-
-
-class ViTEncBERTBase(BertPreTrainedModel):
+class ViTBERTBase(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         # Replace transformer layers with scriptable JIT layers
@@ -930,16 +984,22 @@ class ViTEncBERTBase(BertPreTrainedModel):
 
         # initilize word embedding
         self.embeddings = BertEmbeddings(config)
+        
+        # Copy from VIT
+        self.v_embeddings = ViTEmbeddings(config)
+        self.v_embeddings.load_state_dict(
+            ViTModel.from_pretrained(config.vit_model_name).embeddings.state_dict()
+        )
+
 
         self.task_specific_tokens = config.task_specific_tokens
 
         # initlize the vision embedding
-        self.v_embeddings = BertImageFeatureEmbeddings(config)
-        self.vit = ViTModel.from_pretrained("google/vit-base-patch16-224-in21k")
 
         self.encoder = BertEncoder(config)
         self.t_pooler = BertTextPooler(config)
         self.v_pooler = BertImagePooler(config)
+        self.v_seq_len = config.v_seq_len
 
         self.init_weights()
 
@@ -976,12 +1036,12 @@ class ViTEncBERTBase(BertPreTrainedModel):
             ).type_as(input_txt)
 
         # print("Image Attention", image_attention_mask.shape)
-        if image is not None:
-            image_dict = {"pixel_values":image}
-            v_embedding_output = self.vit(**image_dict).last_hidden_state
-            image_attention_mask = torch.ones(
-                v_embedding_output.size(0), v_embedding_output.size(1)
-            ).type_as(input_txt)
+        image_dict = {"pixel_values":image}
+        v_embedding_output = self.v_embeddings(**image_dict)
+
+        image_attention_mask = torch.ones(
+            image.size(0), self.v_seq_len
+        ).type_as(input_txt)
 
         # print(v_embedding_output.shape)
         all_attention_mask_output: Optional[
@@ -1025,7 +1085,7 @@ class ViTEncBERTBase(BertPreTrainedModel):
 
         if co_attention_mask is None:
             co_attention_mask = torch.zeros(
-                input_txt.size(0), v_embedding_output.size(1), input_txt.size(1)
+                input_txt.size(0), self.v_seq_len, input_txt.size(1)
             ).type_as(extended_image_attention_mask)
 
         extended_co_attention_mask = co_attention_mask.unsqueeze(1)
@@ -1077,11 +1137,11 @@ class ViTEncBERTBase(BertPreTrainedModel):
         )
 
 
-class ViTEncBERTForClassification(nn.Module):
+class ViTBERTForClassification(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.bert = ViTEncBERTBase.from_pretrained(
+        self.bert = ViTBERTBase.from_pretrained(
             self.config.bert_model_name,
             config=BertConfig.from_dict(
                 OmegaConf.to_container(self.config, resolve=True)
@@ -1171,15 +1231,15 @@ class ViTEncBERTForClassification(nn.Module):
         return output
 
 
-@registry.register_model("vitencbert")
-class ViTEncBERT(BaseModel):
+@registry.register_model("vitbert")
+class ViTBERT(BaseModel):
     def __init__(self, config):
         super().__init__(config)
         
 
     @classmethod
     def config_path(cls):
-        return "configs/models/vitencbert/defaults.yaml"
+        return "configs/models/vitbert/defaults.yaml"
 
     # Backward compatibility
     @classmethod
@@ -1192,7 +1252,7 @@ class ViTEncBERT(BaseModel):
 
     def build(self):
 
-        self.model = ViTEncBERTForClassification(self.config)
+        self.model = ViTBERTForClassification(self.config)
 
         if self.config.get("freeze_base", False):
             for p in self.model.bert.parameters():

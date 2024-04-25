@@ -47,14 +47,25 @@ evaluation:
   - roc_auc
 
 training:
+  experiment_name: vitbert-small
+
   batch_size: 1
   lr_scheduler: true
-  max_updates: 22000
+  max_updates: 20000
   find_unused_parameters: true
   early_stop:
     criteria: hateful_memes/roc_auc
     minimize: false
+  wandb: 
+    enabled: true
+    entity: null
+    project: mmf 
+    log_checkpoint: true
 
 checkpoint:
   pretrained_state_mapping:
     model.bert: model.bert
+env:
+    # To change the path to the directory where wandb metadata would be 
+    # stored (Default: env.log_dir):
+  wandb_projectname: mmf
