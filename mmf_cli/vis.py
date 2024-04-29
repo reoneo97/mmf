@@ -14,12 +14,13 @@ from mmf.utils.env import set_seed, setup_imports
 from mmf.utils.flags import flags
 from mmf.utils.general import log_device_names
 from mmf.utils.logger import setup_logger, setup_very_basic_config
-
+from mmf.common.sample import to_device
 
 setup_very_basic_config()
+from torch.autograd import Variable
 
 
-def main(configuration, init_distributed=False, predict=False):
+def main(configuration, init_distributed=False, predict=True):
     # A reload might be needed for imports
     setup_imports()
     configuration.import_user_dir()
@@ -51,10 +52,70 @@ def main(configuration, init_distributed=False, predict=False):
 
     trainer = build_trainer(config)
     trainer.load()
-    if predict:
-        trainer.inference()
-    else:
-        trainer.train()
+    dl = trainer.train_loader
+    dataset_loader = trainer.dataset_loader
+    dataset_type='train'
+    reporter = dataset_loader.get_test_reporter(dataset_type)
+    reporter.get_dataloader()
+    model = trainer.model
+    for idx, batch in enumerate(dl):
+        prepared_batch = reporter.prepare_batch(batch)
+        targets = prepared_batch['targets']
+        prepared_batch = to_device(prepared_batch, trainer.device)
+        prepared_batch['image'] = Variable(prepared_batch['image'], requires_grad=True)
+        
+        model_output = model(prepared_batch)
+        scores = model_output['scores'][torch.arange(len(targets)), targets]
+        score_scalar = scores.sum()
+        score_scalar.backward()
+        x_grad = prepared_batch['image'].grad
+        prepared_batch.detach()
+        saliency = torch.max(torch.abs(x_grad),1)[0]
+        print('Saliency:', saliency.shape)
+        show_saliency_maps(prepared_batch['image'], targets, saliency, idx)
+        # break
+
+import matplotlib.pyplot as plt
+from PIL import Image
+import torchvision.transforms as T
+import numpy as np
+
+def deprocess(img, should_rescale=True):
+    SQUEEZENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    SQUEEZENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    transform = T.Compose([
+        T.Normalize(mean=[0, 0, 0], std=(1.0 / SQUEEZENET_STD).tolist()),
+        T.Normalize(mean=(-SQUEEZENET_MEAN).tolist(), std=[1, 1, 1]),
+    ])
+    return transform(img)
+
+
+
+def show_saliency_maps(X, y, saliency, idx, class_names=['Not Hateful', 'Hateful']):
+    # Convert X and y from numpy arrays to Torch Tensors
+    X = deprocess(X)
+    print(X.min(), X.max())
+
+    # print(type(X))
+    X = X.cpu().numpy()
+    print(X.shape)
+
+    # Compute saliency maps for images in X
+    # Convert the saliency map from Torch Tensor to numpy array and show images
+    # and saliency maps together.
+    saliency = saliency.cpu().numpy()
+
+    N = X.shape[0]
+    for i in range(N):
+        plt.subplot(2, N, i + 1)
+        plt.imshow(X[i].transpose(1,2,0))
+        plt.axis('off')
+        plt.title(class_names[y[i]])
+        plt.subplot(2, N, N + i + 1)
+        plt.imshow(saliency[i], cmap=plt.cm.gray)
+        plt.axis('off')
+        plt.gcf().set_size_inches(12, 5)
+    plt.savefig(f'saliency/saliency_map_{idx}.png', bbox_inches = 'tight')
 
 
 def distributed_main(device_id, configuration, predict=False):

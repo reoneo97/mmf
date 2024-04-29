@@ -1,7 +1,6 @@
 model_config:
-  vitbert:
+  vitencbert:
     bert_model_name: bert-base-uncased
-    vit_model_name: google/vit-base-patch16-224-in21k
     training_head_type: pretraining
     visual_embedding_dim: 2048
     special_visual_initialize: true
@@ -27,12 +26,12 @@ model_config:
     num_hidden_layers: 12
     type_vocab_size: 2
     vocab_size: 30522
-    v_feature_size: 768
+    v_feature_size: 2048
     v_target_size: 1601
-    v_hidden_size: 768
-    v_num_hidden_layers: 12
-    v_num_attention_heads: 12
-    v_intermediate_size: 3072
+    v_hidden_size: 1024
+    v_num_hidden_layers: 6
+    v_num_attention_heads: 8
+    v_intermediate_size: 1024
     bi_hidden_size: 1024
     bi_num_attention_heads: 8
     bi_intermediate_size: 1024
@@ -41,8 +40,8 @@ model_config:
     v_hidden_act: "gelu"
     v_hidden_dropout_prob: 0.1
     v_initializer_range: 0.02
-    v_biattention_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    t_biattention_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    v_biattention_id: [0, 1, 2, 3, 4, 5]
+    t_biattention_id: [6, 7, 8, 9, 10, 11]
     pooling_method: "mul"
     fusion_method: "mul"
     fast_mode: false

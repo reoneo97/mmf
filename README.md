@@ -1,51 +1,53 @@
-
-<div align="center">
-<img src="https://mmf.sh/img/logo.svg" width="50%"/>
-</div>
-
-#
-
-<div align="center">
-  <a href="https://mmf.sh/docs">
-  <img alt="Documentation Status" src="https://readthedocs.org/projects/mmf/badge/?version=latest"/>
-  </a>
-  <a href="https://circleci.com/gh/facebookresearch/mmf">
-  <img alt="CircleCI" src="https://circleci.com/gh/facebookresearch/mmf.svg?style=svg"/>
-  </a>
-</div>
-
----
-
-MMF is a modular framework for vision and language multimodal research from Facebook AI Research. MMF contains reference implementations of state-of-the-art vision and language models and has powered multiple research projects at Facebook AI Research. See full list of project inside or built on MMF [here](https://mmf.sh/docs/notes/projects).
-
-MMF is powered by PyTorch, allows distributed training and is un-opinionated, scalable and fast. Use MMF to **_bootstrap_** for your next vision and language multimodal research project by following the [installation instructions](https://mmf.sh/docs/). Take a look at list of MMF features [here](https://mmf.sh/docs/getting_started/features).
-
-MMF also acts as **starter codebase** for challenges around vision and
-language datasets (The Hateful Memes, TextVQA, TextCaps and VQA challenges). MMF was formerly known as Pythia. The next video shows an overview of how datasets and models work inside MMF. Checkout MMF's [video overview](https://mmf.sh/docs/getting_started/video_overview).
+## Cs7643 project
 
 
-## Installation
+## Run 
 
-Follow installation instructions in the [documentation](https://mmf.sh/docs/).
+## Save Dataset
 
-## Documentation
+`mmf_convert_hm --zip_file=data.zip --password=1 --bypass_checksum=1`
 
-Learn more about MMF [here](https://mmf.sh/docs).
+`mmf_run config=projects/hateful_memes/configs/
 
-## Citation
-
-If you use MMF in your work or use any models published in MMF, please cite:
-
-```bibtex
-@misc{singh2020mmf,
-  author =       {Singh, Amanpreet and Goswami, Vedanuj and Natarajan, Vivek and Jiang, Yu and Chen, Xinlei and Shah, Meet and
-                 Rohrbach, Marcus and Batra, Dhruv and Parikh, Devi},
-  title =        {MMF: A multimodal framework for vision and language research},
-  howpublished = {\url{https://github.com/facebookresearch/mmf}},
-  year =         {2020}
-}
+## Run ViTEncBert
+```sh
+mmf_run config=projects/hateful_memes/configs/vilbert/vitencbert.yaml \
+    model=vitencbert \
+    dataset=hateful_memes \
+    run_type=train_val
 ```
 
-## License
+Code Changes
+- Slight bugfix for wandb logger
+- Added code for the hateful memes dataset
+- Adjust preprocessing code 
 
-MMF is licensed under BSD license available in [LICENSE](LICENSE) file
+
+## VITBERT
+```sh
+mmf_run config=projects/hateful_memes/configs/vilbert/vitbert.yaml \
+    model=vitbert \
+    dataset=hateful_memes \
+    run_type=train_val 
+```
+- Copy over embeddings
+- Alignment of attention layers
+    - There are 12 layers each for text and image
+What was done
+
+```sh
+mmf_run config=projects/hateful_memes/configs/vilbert/vitbert.yaml \
+    model=vitbert \
+    dataset=hateful_memes \
+    run_type=train_val 
+```
+
+
+## Prediction
+
+
+mmf_predict config=projects/hateful_memes/configs/vilbert/vitencbert.yaml \
+    model=vitencbert \
+    dataset=hateful_memes \
+    run_type=test \
+    checkpoint.resume_file=

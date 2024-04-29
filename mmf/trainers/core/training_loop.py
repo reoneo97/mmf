@@ -163,7 +163,6 @@ class TrainerTrainingLoopMixin(ABC):
                     break
 
     def run_training_batch(self, batch: Dict[str, Tensor], loss_divisor: int) -> None:
-        print(batch.keys())
         report = self._forward(batch)
         if self.training_config.exit_on_nan_losses:
             self._check_nan_losses(report)

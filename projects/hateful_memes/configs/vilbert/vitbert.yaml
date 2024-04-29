@@ -4,6 +4,12 @@ model_config:
     num_labels: 2
     losses:
     - cross_entropy
+    v_hidden_size: 768
+    v_seq_len: 197
+    image_size: 224
+    patch_size: 16
+    num_channels: 3
+
 
 dataset_config:
   hateful_memes:
@@ -28,6 +34,20 @@ dataset_config:
           bbox_key: bbox
           image_width_key: image_width
           image_height_key: image_height
+      image_processor:
+        type: torchvision_transforms
+        params:
+          transforms:
+            - type: Resize
+              params:
+                size: [224, 224]
+            - ToTensor
+            - GrayScaleTo3Channels
+            - type: Normalize
+              params:
+                mean: [0.46777044, 0.44531429, 0.40661017]
+                std: [0.12221994, 0.12145835, 0.14380469]
+
 
 optimizer:
   type: adam_w
@@ -48,14 +68,25 @@ evaluation:
   - roc_auc
 
 training:
-  batch_size: 1
+  experiment_name: vitbert-small
+  batch_size: 32
   lr_scheduler: true
-  max_updates: 22000
+  max_updates: 10000
   find_unused_parameters: true
   early_stop:
     criteria: hateful_memes/roc_auc
     minimize: false
-
+  wandb: 
+    enabled: true
+    entity: null
+    project: mmf 
 checkpoint:
   pretrained_state_mapping:
     model.bert: model.bert
+        
+env:
+    # To change the path to the directory where wandb metadata would be 
+    # stored (Default: env.log_dir):
+  wandb_projectname: mmf
+
+
