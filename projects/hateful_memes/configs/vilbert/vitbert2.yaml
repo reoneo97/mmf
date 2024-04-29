@@ -9,6 +9,8 @@ model_config:
     image_size: 224
     patch_size: 16
     num_channels: 3
+    v_biattention_id: [6, 7, 8, 9, 10, 11]
+    t_biattention_id: [6, 7, 8, 9, 10, 11]
 
 
 dataset_config:
@@ -80,6 +82,7 @@ training:
     enabled: true
     entity: null
     project: mmf 
+  evaluation_interval: 500
 checkpoint:
   pretrained_state_mapping:
     model.bert: model.bert

@@ -541,7 +541,6 @@ class BertConnectionLayer(nn.Module):
         co_attention_mask: Optional[Tensor] = None,
         use_co_attention_mask: bool = False,
     ) -> Tuple[Tensor, Tensor, Dict[str, Tensor]]:
-        print(input_tensor1.shape)
 
         bi_output1, bi_output2, co_attention_probs = self.biattention(
             input_tensor1,

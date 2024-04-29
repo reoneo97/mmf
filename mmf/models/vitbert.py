@@ -330,6 +330,8 @@ class ViTBertLayer(ViTLayer):
         txt_attention_mask: Tensor,
         output_attentions: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
         self_attention_outputs = self.attention(
             self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
             head_mask,
